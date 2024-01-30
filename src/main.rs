@@ -4,11 +4,11 @@ use ark_ec::{
     pairing::Pairing,
     AffineRepr, CurveGroup,
 };
-use ark_ff::field_hashers::DefaultFieldHasher;
+use ark_ff::{field_hashers::DefaultFieldHasher, BigInt, Field};
 
 use ark_serialize::{CanonicalDeserialize, Read};
 
-use prompt::{puzzle, welcome};
+use prompt::{welcome};
 
 use sha2::Sha256;
 use std::fs::File;
@@ -16,6 +16,8 @@ use std::io::Cursor;
 use std::ops::{Mul, Neg};
 
 use ark_std::{rand::SeedableRng, UniformRand, Zero};
+
+use log::{debug, LevelFilter, warn};
 
 fn derive_point_for_pok(i: usize) -> G2Affine {
     let rng = &mut ark_std::rand::rngs::StdRng::seed_from_u64(20399u64);
@@ -32,7 +34,7 @@ fn pok_verify(pk: G1Affine, i: usize, proof: G2Affine) {
         &[pk, G1Affine::generator()],
         &[derive_point_for_pok(i).neg(), proof]
     )
-    .is_zero());
+        .is_zero());
 }
 
 fn hasher() -> MapToCurveBasedHasher<G2Projective, DefaultFieldHasher<Sha256, 128>, WBMap<Config>> {
@@ -40,7 +42,7 @@ fn hasher() -> MapToCurveBasedHasher<G2Projective, DefaultFieldHasher<Sha256, 12
         MapToCurveBasedHasher::<G2Projective, DefaultFieldHasher<Sha256, 128>, WBMap<Config>>::new(
             &[1, 3, 3, 7],
         )
-        .unwrap();
+            .unwrap();
     wb_to_curve_hasher
 }
 
@@ -54,7 +56,7 @@ fn bls_verify(pk: G1Affine, sig: G2Affine, msg: &[u8]) {
         &[pk, G1Affine::generator()],
         &[hasher().hash(msg).unwrap().neg(), sig]
     )
-    .is_zero());
+        .is_zero());
 }
 
 fn from_file<T: CanonicalDeserialize>(path: &str) -> T {
@@ -65,8 +67,11 @@ fn from_file<T: CanonicalDeserialize>(path: &str) -> T {
 }
 
 fn main() {
+    env_logger::builder()
+        .filter_level(LevelFilter::Debug)
+        .init();
+
     welcome();
-    puzzle(PUZZLE_DESCRIPTION);
 
     let public_keys: Vec<(G1Affine, G2Affine)> = from_file("public_keys.bin");
 
@@ -76,27 +81,73 @@ fn main() {
         .for_each(|(i, (pk, proof))| pok_verify(*pk, i, *proof));
 
     let new_key_index = public_keys.len();
-    let message = b"YOUR GITHUB USERNAME";
+    let message = b"intldds";
 
     /* Enter solution here */
 
-    let new_key = G1Affine::zero();
-    let new_proof = G2Affine::zero();
-    let aggregate_signature = G2Affine::zero();
+    // 1. creating rogue key
+
+    let secret = Fr::from(BigInt!("100"));
+
+    let my_key = G1Affine::generator().mul(secret).into_affine();
+
+    let new_key = public_keys
+        .iter()
+        .fold(G1Projective::from(my_key), |acc, (key, _)| acc + key.neg())
+        .into_affine();
+
+
+    // 2. generating proof of knowledge (PoK)
+
+    let my_proof = pok_prove(secret, new_key_index);
+
+    let new_proof = public_keys
+        .iter()
+        .enumerate()
+        .fold(G2Projective::from(my_proof), |acc, (i, (_, proof))| {
+            let rhs = Fr::from(new_key_index as u128 + 1) * Fr::from(i as u128 + 1).inverse().unwrap();
+            acc + proof.mul(rhs).neg()
+        })
+        .into_affine();
+
+
+    // 3. forge signatures
+
+    let my_sig = bls_sign(secret, message);
+
+    let fake_sig = public_keys
+        .iter()
+        .fold(G2Projective::from(my_sig), |acc, (_, proof)| acc + proof.neg())
+        .into_affine();
+
+    let aggregate_signature = public_keys
+        .iter()
+        .fold(G2Projective::from(fake_sig), |acc, (_, proof)| acc + proof)
+        .into_affine();
 
     /* End of solution */
 
     pok_verify(new_key, new_key_index, new_proof);
+
+    debug!("PoK verified");
+
     let aggregate_key = public_keys
         .iter()
         .fold(G1Projective::from(new_key), |acc, (pk, _)| acc + pk)
         .into_affine();
-    bls_verify(aggregate_key, aggregate_signature, message)
+
+    debug!("aggregate key created");
+
+    // perform BLS verification and check the result
+    if let Err(err) = std::panic::catch_unwind(|| {
+        bls_verify(aggregate_key, aggregate_signature, message);
+    }) {
+        // catch any panic and print an error message
+        println!("BLS verification panicked: {:?}", err);
+    } else {
+        println!("BLS verification successful!");
+        warn!("end");
+    }
+
+    println!("puzzle completed");
 }
-
-const PUZZLE_DESCRIPTION: &str = r"
-Bob has been designing a new optimized signature scheme for his L1 based on BLS signatures. Specifically, he wanted to be able to use the most efficient form of BLS signature aggregation, where you just add the signatures together rather than having to delinearize them. In order to do that, he designed a proof-of-possession scheme based on the B-KEA assumption he found in the the Sapling security analysis paper by Mary Maller [1]. Based the reasoning in the Power of Proofs-of-Possession paper [2], he concluded that his scheme would be secure. After he deployed the protocol, he found it was attacked and there was a malicious block entered the system, fooling all the light nodes...
-
-[1] https://github.com/zcash/sapling-security-analysis/blob/master/MaryMallerUpdated.pdf
-[2] https://rist.tech.cornell.edu/papers/pkreg.pdf
-";

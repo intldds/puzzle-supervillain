@@ -1,0 +1,2 @@
+cargo:rustc-env=TYPENUM_BUILD_CONSTS=/Users/miguelpereira/Desktop/puzzle-supervillain/target/debug/build/typenum-219dc623588111a8/out/consts.rs
+cargo:rustc-env=TYPENUM_BUILD_OP=/Users/miguelpereira/Desktop/puzzle-supervillain/target/debug/build/typenum-219dc623588111a8/out/op.rs
